@@ -2,4 +2,4 @@ ROTEIRO_TESTES_PREPROCESSAMENTO.md
 .env
 __pycache__/
 .venv/
-data/emporio.db
+.pytest_cache/

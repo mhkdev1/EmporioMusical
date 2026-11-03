@@ -120,20 +120,3 @@ def policy() -> dict[str, str]:
     """Current policy sections. Reloads only when the PDF changed on disk."""
     return _policy_at(POLICY_FILE.stat().st_mtime)
 
-import time
-import tools
-
-a = tools.tables()
-b = tools.tables()
-print("same object when nothing changed:", a is b)
-
-orders_csv = tools.CSV_FILES[2]
-original = orders_csv.read_text(encoding="utf-8")
-try:
-    print("before:", tools.tables()["orders"].loc[0, "status"])
-    time.sleep(1)
-    orders_csv.write_text(original.replace("1,3,2025-10-15,delivered", "1,3,2025-10-15,cancelled"), encoding="utf-8")
-    print("after editing the CSV:", tools.tables()["orders"].loc[0, "status"])
-finally:
-    orders_csv.write_text(original, encoding="utf-8")
-print("restored:", tools.tables()["orders"].loc[0, "status"])
