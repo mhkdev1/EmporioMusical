@@ -174,8 +174,9 @@ def price_info(product_id: int, list_price: float) -> dict:
         final = list_price
         info = {"list_price_brl": list_price, "final_price_brl": final,
                 "pix_price_brl": round(list_price * (1 - PIX_DISCOUNT), 2)}
-    n = max_installments(final)
-    return {**info, "max_installments": n, "installment_brl": round(final / n, 2)}
+        # Every installment option the customer can pick, so "em 6x?" or "em 9x?" is a lookup, never a division.
+    options = {f"{n}x": round(final / n, 2) for n in range(1, max_installments(final) + 1)}
+    return {**info, "installments": options}
 
 
 def availability(status: str, stock: int) -> str:
@@ -204,15 +205,16 @@ def search_products(category: str | None = None, max_price: float | None = None,
 
     results = []
     for p in products.itertuples():
+        info = price_info(int(p.product_id), float(p.price_brl))
         item = {
             "product_id": int(p.product_id),
             "name": p.name,
             "category": p.category,
             "availability": availability(p.status, p.stock_quantity),
-            "stock_quantity": int(p.stock_quantity),
-            **price_info(int(p.product_id), float(p.price_brl)),
-            "specs": p.specs,
+            "final_price_brl": info["final_price_brl"],
         }
+        if "promotion" in info:
+            item["discount_percent"] = info["discount_percent"]
         # max_price is checked on the final price, so a product on sale can fit under the limit
         if max_price is None or item["final_price_brl"] <= max_price:
             results.append(item)
@@ -239,6 +241,24 @@ def similar_in_stock(product: dict, limit: int = 3) -> list[dict]:
     ]
     candidates.sort(key=lambda c: abs(c["final_price_brl"] - product["final_price_brl"]))
     return candidates[:limit]
+
+def get_product(product_id: int) -> dict:
+    """Everything about one product: prices, every installment option, stock and specs."""
+    products = tables()["products"]
+    row = products[products["product_id"] == int(product_id)]
+    if row.empty:
+        return {"error": f"No product with id {product_id}."}
+    p = row.iloc[0]
+    return {
+        "product_id": int(p["product_id"]),
+        "name": p["name"],
+        "category": p["category"],
+        "availability": availability(p["status"], p["stock_quantity"]),
+        "stock_quantity": int(p["stock_quantity"]),
+        **price_info(int(p["product_id"]), float(p["price_brl"])),
+        "description": p["description"],
+        "specs": p["specs"],
+    }
 
 
 def active_promotions(product_id: int | None = None) -> list[dict]:

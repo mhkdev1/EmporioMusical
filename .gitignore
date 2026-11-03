@@ -3,3 +3,4 @@ ROTEIRO_TESTES_PREPROCESSAMENTO.md
 __pycache__/
 .venv/
 .pytest_cache/
+hist

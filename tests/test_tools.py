@@ -135,20 +135,17 @@ def test_active_discount():
 
 
 def test_price_info_without_promotion_has_pix():
-    assert tools.price_info(95, 2199.0) == {
-        "list_price_brl": 2199.0, "final_price_brl": 2199.0, "pix_price_brl": 2089.05,
-        "max_installments": 12, "installment_brl": 183.25,
-    }
+    info = tools.price_info(95, 2199.0)  # Takamine GD20
+    assert info["final_price_brl"] == 2199.0 and info["pix_price_brl"] == 2089.05
+    assert info["installments"]["12x"] == 183.25 and info["installments"]["6x"] == 366.5
+    assert len(info["installments"]) == 12
 
 
 def test_price_info_with_promotion_has_no_pix():
-    info = tools.price_info(94, 5999.0)
-    assert info["promotion"] == "Desconto Exclusivo"
-    assert info["discount_percent"] == 8
-    assert info["final_price_brl"] == 5519.08
+    info = tools.price_info(94, 5999.0)  # Taylor 110e, 8% off
+    assert info["discount_percent"] == 8 and info["final_price_brl"] == 5519.08
     assert info["pix_price_brl"] is None
-    assert info["installment_brl"] == round(5519.08 / 12, 2)  # installments use the promo price
-
+    assert info["installments"]["12x"] == round(5519.08 / 12, 2)  # installments use the promo price
 
 @pytest.mark.parametrize("status, stock, expected", [
     ("active", 5, "in_stock"),
@@ -161,13 +158,20 @@ def test_availability(status, stock, expected):
 
     # ---------- catalog, promotions and policy lookups
 
-def test_search_by_name_returns_prices_from_code():
-    found = tools.search_products(term="takamine gd20")
-    assert found["total_found"] == 1
-    gd20 = found["products"][0]
+def test_search_rows_are_short():
+    gd20 = tools.search_products(term="takamine gd20")["products"][0]
+    assert set(gd20) == {"product_id", "name", "category", "availability", "final_price_brl"}
+
+
+def test_get_product_has_every_detail():
+    gd20 = tools.get_product(95)
     assert gd20["name"] == "Takamine GD20 Dreadnought Natural"
-    assert gd20["final_price_brl"] == 2199.0 and gd20["pix_price_brl"] == 2089.05
-    assert gd20["max_installments"] == 12 and gd20["installment_brl"] == 183.25
+    assert gd20["pix_price_brl"] == 2089.05 and gd20["installments"]["12x"] == 183.25
+    assert gd20["specs"]["top"] == "Cedro Sólido"
+
+
+def test_get_product_unknown_id():
+    assert "error" in tools.get_product(9999)
 
 
 def test_search_by_category_and_max_price():
@@ -182,6 +186,11 @@ def test_search_puts_in_stock_first_and_cheapest_first():
     assert all(p["availability"] == "in_stock" for p in products)
     prices = [p["final_price_brl"] for p in products]
     assert prices == sorted(prices)
+
+def test_installment_table_only_lists_allowed_options():
+    options = tools.get_product(142)["installments"]  # Korg Synth 1 Pro, R$ 1.127,00
+    assert options["6x"] == 187.83 and options["11x"] == 102.45
+    assert "12x" not in options  # R$ 93,92 per installment would be under the R$ 100 minimum
 
 
 @pytest.mark.parametrize("a, b", [
