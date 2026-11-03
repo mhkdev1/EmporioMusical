@@ -110,3 +110,51 @@ def test_tables_reload_when_a_csv_changes(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     assert tools.tables()["orders"].loc[0, "status"] == "cancelled"
+
+   
+   
+ # ---------- prices and stock
+
+@pytest.mark.parametrize("price, expected", [
+    (40, 1),       # below R$ 50, no installments
+    (150, 3),      # 3x of 50
+    (159.9, 3),    # 4x would be 39.97, under the R$ 80 minimum
+    (480, 6),      # 6x of 80
+    (699.9, 6),    # 7x would be 99.99, under the R$ 100 minimum
+    (700, 7),
+    (1200, 12),
+    (9999, 12),    # never more than 12x
+])
+def test_max_installments(price, expected):
+    assert tools.max_installments(price) == expected
+
+
+def test_active_discount():
+    assert tools.active_discount(94) == (8, "Desconto Exclusivo")
+    assert tools.active_discount(95) is None  # Takamine GD20 has no active promotion
+
+
+def test_price_info_without_promotion_has_pix():
+    assert tools.price_info(95, 2199.0) == {
+        "list_price_brl": 2199.0, "final_price_brl": 2199.0, "pix_price_brl": 2089.05,
+        "max_installments": 12, "installment_brl": 183.25,
+    }
+
+
+def test_price_info_with_promotion_has_no_pix():
+    info = tools.price_info(94, 5999.0)
+    assert info["promotion"] == "Desconto Exclusivo"
+    assert info["discount_percent"] == 8
+    assert info["final_price_brl"] == 5519.08
+    assert info["pix_price_brl"] is None
+    assert info["installment_brl"] == round(5519.08 / 12, 2)  # installments use the promo price
+
+
+@pytest.mark.parametrize("status, stock, expected", [
+    ("active", 5, "in_stock"),
+    ("active", 0, "out_of_stock"),
+    ("discontinued", 3, "discontinued"),
+    ("coming_soon", 0, "coming_soon"),
+])
+def test_availability(status, stock, expected):
+    assert tools.availability(status, stock) == expected
