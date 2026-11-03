@@ -1,4 +1,10 @@
-#Store data/ CSVs, policy manual and the tools the agent can call.
+"""Store data and business rules.
+
+Loads the six CSV files and the policy manual (PDF) from `src/data`, applies the store's rules (prices, PIX
+discount, installments, availability, delivery dates, login) and answers the lookups the agent's tools use.
+
+Everything here is plain Python and pandas. Nothing in this module depends on LangChain or on a model.
+"""
 
 import json
 import re
@@ -13,7 +19,10 @@ from datetime import date
 
 
 PIX_DISCOUNT = 0.05  #5% off the list price
+"""Discount for paying with PIX (manual 3). Not applied on top of a promotional price (manual 6.2)."""
+
 MAX_RESULTS = 10  # keeps the tool output short for the model
+"""Most products a search returns, so the model gets a short list to choose from."""
 
 # Words people use to talk about price or to mean "any product". They aren't product names, so I drop
 # them from the search term instead of letting "barato" or "menor custo" make the search come back empty.
@@ -22,13 +31,23 @@ FILLER_WORDS = {
     "menor", "maior", "custo", "preco", "precos", "valor", "produto", "produtos", "equipamento",
     "equipamentos", "item", "itens", "qual", "quais", "o", "a", "os", "as", "de", "do", "da", "um", "uma",
 }
+"""Words ignored in search terms: price words and generic words like "produto"."""
+
 ANY_CATEGORY = {"todos", "todas", "todo", "toda", "qualquer", "geral", "all"}
+"""Category values that mean "no category filter"."""
 
 DATA = Path(__file__).parent / "data"
+"""Folder with the CSV files and the policy PDF."""
+
 CSV_PREFIX = "desafio_tecnico_ai_eng - "
+"""Common start of the CSV file names."""
+
 CSV_FILES = [DATA / f"{CSV_PREFIX}{name}.csv" for name in
              ("categories", "customers", "orders", "order_items", "products", "promotions")]
+"""The six CSV files, watched for changes by `tables()`."""
+
 POLICY_FILE = DATA / "políticas_da_loja.pdf"
+"""The store's policy manual, watched for changes by `policy()`."""
 
 # Top-level headings of the manual, in the order they appear.
 # I list them by hand because section 7.2 has its own numbered steps
@@ -45,22 +64,51 @@ POLICY_HEADINGS = {
     "privacy": "9. Privacidade e Proteção de Dados",
     "final": "10. Disposições Finais",
 }
+"""Section key used by the agent -> heading exactly as it appears in the manual, in document order."""
 
 
-#Lowercase and drop accents used to compare text.
 def normalize(text: str) -> str:
+    """Lowercase a text and drop its accents, for comparisons only.
 
+    Customers' text and catalog text are compared through this function, so "Violões", "violoes" and
+    "VIOLÕES" match. The original text, with accents, is what the customer sees.
+
+    Args:
+        text: Any value; it is converted to `str` first.
+
+    Returns:
+        The text in lower case, without accents. Example: "Violões Elétricos" -> "violoes eletricos".
+    """
     return unicodedata.normalize("NFKD", str(text)).encode("ascii", "ignore").decode().lower()
 
 
 def load_csv(name: str) -> pd.DataFrame:
+    """Read one of the store's CSV files.
+
+    Args:
+        name: Short table name, e.g. "products" or "orders".
+
+    Returns:
+        The table as a DataFrame, read as UTF-8 so accents are kept.
+    """
     return pd.read_csv(DATA / f"{CSV_PREFIX}{name}.csv", encoding="utf-8")
 
 
-
-#Read the six CSVs and clean the columns the tools filter on.
 def load_tables() -> dict[str, pd.DataFrame]:
-    
+    """Read the six CSVs and prepare the columns the lookups filter on.
+
+    Cleaning done here:
+
+    - customers: e-mail in lower case and a `phone_digits` column (digits only), so login accepts any format.
+    - orders: `order_date` and `estimated_delivery` parsed as dates (empty for orders not shipped yet).
+    - products: `specs` parsed from JSON, the category name joined in, and an accent-free `search_text`.
+    - promotions: `is_active` as a boolean.
+
+    Use `tables()` instead of calling this directly; it adds caching.
+
+    Returns:
+        A dict with the keys categories, customers, orders, order_items, products and promotions.
+    """
     categories = load_csv("categories")
     customers = load_csv("customers")
     orders = load_csv("orders")
@@ -96,9 +144,21 @@ def load_tables() -> dict[str, pd.DataFrame]:
     }
 
 
-#Read the policy PDF and split it into {section_key: text}
 def load_policy() -> dict[str, str]:
-    
+    """Read the policy manual and split it into its 10 sections.
+
+    pypdf returns this PDF with almost one word per line, so whitespace is flattened first. Repeated page
+    headers, page numbers and phone numbers broken across lines are cleaned up. The cover page, which holds
+    the address and phone numbers, comes before section 1 and is joined to the "about" section.
+
+    Use `policy()` instead of calling this directly; it adds caching.
+
+    Returns:
+        A dict mapping each key of `POLICY_HEADINGS` to the text of that section.
+
+    Raises:
+        ValueError: If a heading in `POLICY_HEADINGS` is not found in the PDF.
+    """
     text = " ".join(page.extract_text() for page in PdfReader(POLICY_FILE).pages)
     # pypdf returns this file with almost one word per line, so I flatten the whitespace first.
     text = re.sub(r"\s+", " ", text)
@@ -118,32 +178,52 @@ def load_policy() -> dict[str, str]:
 # lru_cache keys on the files' modification time: same time, cached data; any file changed, reload.
 @lru_cache(maxsize=1)
 def _tables_at(mtime: float) -> dict[str, pd.DataFrame]:
+    """Cached `load_tables()`; a new `mtime` means a file changed, so it loads again."""
     return load_tables()
 
 
 @lru_cache(maxsize=1)
 def _policy_at(mtime: float) -> dict[str, str]:
+    """Cached `load_policy()`; a new `mtime` means the PDF changed, so it loads again."""
     return load_policy()
 
 
 def tables() -> dict[str, pd.DataFrame]:
-    """Current store data. Reloads only when one of the CSVs changed on disk."""
+    """Current store data, reloaded only when one of the CSVs changed on disk.
+
+    The cache key is the newest modification time among the six files. If any of them is saved again, the
+    key changes and all tables are reloaded (products depend on categories). Otherwise the data in memory
+    is returned right away.
+
+    Returns:
+        The same dict as `load_tables()`.
+    """
     return _tables_at(max(f.stat().st_mtime for f in CSV_FILES))
 
 
 def policy() -> dict[str, str]:
-    """Current policy sections. Reloads only when the PDF changed on disk."""
+    """Current policy sections, reloaded only when the PDF changed on disk.
+
+    Returns:
+        The same dict as `load_policy()`.
+    """
     return _policy_at(POLICY_FILE.stat().st_mtime)
 
 
 # ---------- prices and stock (the model never does this math)
 
 
-
-    # Best active promotion for a product. promotions don't stack so if a product has more than one I take the biggest.
-    
 def active_discount(product_id: int) -> tuple[int, str] | None:
-    
+    """Best active promotion for a product.
+
+    Promotions don't stack (manual 6.2), so when a product has more than one, the biggest discount wins.
+
+    Args:
+        product_id: Product to check.
+
+    Returns:
+        `(discount_percent, campaign_name)`, or `None` if the product has no active promotion.
+    """
     promos = tables()["promotions"]
     rows = promos[(promos["product_id"] == product_id) & promos["is_active"]]
     if rows.empty:
@@ -152,9 +232,18 @@ def active_discount(product_id: int) -> tuple[int, str] | None:
     return int(best["discount_percent"]), best["description"]
 
 
-#  Most interest-free installments allowed for this price (manual 3.1). Minimum installment: R$ 50 up to 3x, R$ 80 from 4x to 6x, R$ 100 from 7x to 12x.   
 def max_installments(price: float) -> int:
-   
+    """Most interest-free installments allowed for a price (manual 3.1).
+
+    The minimum installment is R$ 50 up to 3x, R$ 80 from 4x to 6x and R$ 100 from 7x to 12x. The function
+    tries 12x first and goes down until the installment value meets the minimum for that range.
+
+    Args:
+        price: Final price in BRL, after any promotion.
+
+    Returns:
+        Number of installments, from 1 (no installments) to 12. Examples: 159.90 -> 3, 2199.00 -> 12.
+    """
     for n in range(12, 1, -1):
         minimum = 100 if n >= 7 else 80 if n >= 4 else 50
         if price / n >= minimum:
@@ -163,7 +252,20 @@ def max_installments(price: float) -> int:
 
 
 def price_info(product_id: int, list_price: float) -> dict:
-    """Every price figure the agent is allowed to quote for a product."""
+    """Every price figure the agent is allowed to quote for a product.
+
+    The model copies these numbers instead of calculating them. The installment table lists every allowed
+    option, so a question like "em 9x?" is a lookup; a number missing from the table is not allowed.
+
+    Args:
+        product_id: Product, used to find an active promotion.
+        list_price: Catalog price in BRL.
+
+    Returns:
+        A dict with `list_price_brl`, `final_price_brl`, `pix_price_brl` (5% off, or `None` when there is
+        a promotion), `installments` (e.g. `{"1x": 2199.0, ..., "12x": 183.25}`) and, when a promotion
+        applies, `promotion` and `discount_percent`.
+    """
     promo = active_discount(product_id)
     if promo:
         percent, campaign = promo
@@ -180,7 +282,15 @@ def price_info(product_id: int, list_price: float) -> dict:
 
 
 def availability(status: str, stock: int) -> str:
-    """in_stock, out_of_stock, discontinued or coming_soon."""
+    """Turn the catalog status and the stock into one availability value.
+
+    Args:
+        status: Catalog status: "active", "discontinued" or "coming_soon".
+        stock: Units in stock.
+
+    Returns:
+        "in_stock", "out_of_stock", "discontinued" or "coming_soon".
+    """
     if status != "active":
         return status
     return "in_stock" if stock > 0 else "out_of_stock"
@@ -190,9 +300,22 @@ def availability(status: str, stock: int) -> str:
 
 def search_products(category: str | None = None, max_price: float | None = None, term: str | None = None,
                     sort: str = "cheapest") -> dict:
-    """Products filtered by category, max final price and words in name/description. All optional.
+    """Search the catalog. All filters are optional and can be combined.
 
-    sort is "cheapest" or "most_expensive".
+    Every word of `term` must appear in the product's name, description or category, ignoring accents and
+    case; generic words in `FILLER_WORDS` are skipped. `max_price` is checked against the final price, so a
+    product on sale can fit under the limit. Results put in-stock products first, then sort by price.
+
+    Args:
+        category: Category name ("Violões", "violoes"...). Values in `ANY_CATEGORY` mean no filter.
+        max_price: Highest final price in BRL.
+        term: Brand, model or feature words, e.g. "takamine gd20" or "nylon".
+        sort: "cheapest" or "most_expensive".
+
+    Returns:
+        `{"total_found": int, "products": [...]}` with at most `MAX_RESULTS` short rows (`product_id`,
+        `name`, `category`, `availability`, `final_price_brl` and, on sale, `discount_percent`). When
+        nothing found is in stock, also `in_stock_alternatives` from `similar_in_stock()`.
     """
     products = tables()["products"]
     if category and normalize(category) not in ANY_CATEGORY:
@@ -230,7 +353,18 @@ def search_products(category: str | None = None, max_price: float | None = None,
     return found
 
 def similar_in_stock(product: dict, limit: int = 3) -> list[dict]:
-    """In-stock products from the same category, closest in price to the given one."""
+    """In-stock products from the same category, closest in price to the given one.
+
+    Gives the model real alternatives to suggest when a product is unavailable, so it doesn't make
+    one up.
+
+    Args:
+        product: A search row with at least `category` and `final_price_brl`.
+        limit: How many alternatives to return.
+
+    Returns:
+        Up to `limit` dicts with `product_id`, `name` and `final_price_brl`, closest price first.
+    """
     products = tables()["products"]
     in_stock = products[(products["category"] == product["category"])
                         & (products["status"] == "active") & (products["stock_quantity"] > 0)]
@@ -243,7 +377,18 @@ def similar_in_stock(product: dict, limit: int = 3) -> list[dict]:
     return candidates[:limit]
 
 def get_product(product_id: int) -> dict:
-    """Everything about one product: prices, every installment option, stock and specs."""
+    """Everything about one product.
+
+    Search returns short rows; this returns the full detail of the product the customer is talking
+    about, so follow-up questions reuse the same `product_id`.
+
+    Args:
+        product_id: Product to look up.
+
+    Returns:
+        `product_id`, `name`, `category`, `availability`, `stock_quantity`, every field of `price_info()`,
+        `description` and `specs`. If the id doesn't exist, `{"error": ...}`.
+    """
     products = tables()["products"]
     row = products[products["product_id"] == int(product_id)]
     if row.empty:
@@ -262,7 +407,14 @@ def get_product(product_id: int) -> dict:
 
 
 def active_promotions(product_id: int | None = None) -> list[dict]:
-    """Active promotions with the discounted price, for every product or just one."""
+    """Active promotions with their prices.
+
+    Args:
+        product_id: Only this product's promotions. `None` returns all of them.
+
+    Returns:
+        A list of dicts with `product_id`, `name`, `availability` and every field of `price_info()`.
+    """
     promos = tables()["promotions"]
     promos = promos[promos["is_active"]]
     if product_id is not None:
@@ -282,7 +434,14 @@ def active_promotions(product_id: int | None = None) -> list[dict]:
 
 
 def get_policy_section(section: str) -> str:
-    """Text of one section of the manual. Unknown keys get the list of valid ones back."""
+    """Text of one section of the policy manual.
+
+    Args:
+        section: A key of `POLICY_HEADINGS`, e.g. "hours" or "returns".
+
+    Returns:
+        The section text. For an unknown key, a message listing the valid keys, so the model can retry.
+    """
     sections = policy()
     if section not in sections:
         return f"Unknown section '{section}'. Available: {', '.join(sections)}."
@@ -293,13 +452,22 @@ def get_policy_section(section: str) -> str:
 # ---------- login, orders and the customer's own account
 
 NOT_LOGGED_IN = {"error": "Customer is not logged in. Ask them to type /login followed by their e-mail or phone."}
+"""Returned by order and account lookups when nobody is logged in."""
+
 # Same answer for "this order doesn't exist" and "this order belongs to someone else",
 # so nobody can find out which order numbers exist by trying them.
 ORDER_NOT_FOUND = {"error": "No order with this number for the logged-in customer. Ask them to check the number."}
+"""Returned for a missing order and for someone else's order alike, so order numbers can't be probed."""
 
-#find duplicated contacts, so the CLI can ask for the other one when a login is ambiguous
+
 def duplicate_contacts() -> dict[str, list[str]]:
-    """E-mails and phones that show up in more than one customer record."""
+    """E-mails and phones that show up in more than one customer record.
+
+    A data-quality check: in the provided data, customers 11 and 43 share one e-mail.
+
+    Returns:
+        `{"emails": [...], "phones": [...]}`, each list sorted.
+    """
     c = tables()["customers"]
     return {
         "emails": sorted(c.loc[c["email"].duplicated(keep=False), "email"].unique()),
@@ -308,7 +476,18 @@ def duplicate_contacts() -> dict[str, list[str]]:
 
 
 def _matches(customers: pd.DataFrame, email_or_phone: str) -> pd.Series:
-    """Rows whose e-mail is exactly this, or whose phone ends with these digits (8 or more)."""
+    """Which customers match an e-mail or a phone.
+
+    The e-mail must match exactly (ignoring case and spaces). A phone matches when the stored number ends
+    with the digits typed, so it works with or without the area code; at least 8 digits are required.
+
+    Args:
+        customers: Customers table, or a subset of it.
+        email_or_phone: What the customer typed.
+
+    Returns:
+        A boolean Series, True for each matching row.
+    """
     given = email_or_phone.strip().lower()
     digits = "".join(ch for ch in given if ch.isdigit())
     by_email = customers["email"] == given
@@ -317,12 +496,20 @@ def _matches(customers: pd.DataFrame, email_or_phone: str) -> pd.Series:
 
 
 def find_customer(email_or_phone: str, confirm: str | None = None) -> dict:
-    """Login lookup, used by /login. Never exposed to the model.
+    """Find the customer behind a login attempt. Used by `/login` only, never exposed to the model.
 
-    Returns {"status": "ok", "customer_id", "name"} when exactly one record matches.
-    When more than one does (customers 11 and 43 share an e-mail), it returns
-    {"status": "need_more", "ask_for": "phone" or "email"} so the CLI can ask for the other contact,
-    and the second call passes it in confirm. Anything else is {"status": "not_found"}.
+    When the contact matches more than one record (customers 11 and 43 share an e-mail), the CLI asks for
+    the other contact and calls this again with it in `confirm`. The confirmation is only looked for among
+    the records the first contact matched, so another person's phone can't be used.
+
+    Args:
+        email_or_phone: E-mail or phone typed after `/login`.
+        confirm: The second contact, when the first one was ambiguous.
+
+    Returns:
+        `{"status": "ok", "customer_id": int, "name": str}` for exactly one match,
+        `{"status": "need_more", "ask_for": "phone" | "email"}` for an ambiguous first contact, or
+        `{"status": "not_found"}` otherwise.
     """
     customers = tables()["customers"]
     found = customers[_matches(customers, email_or_phone)]
@@ -336,7 +523,21 @@ def find_customer(email_or_phone: str, confirm: str | None = None) -> dict:
     return {"status": "not_found"}
 
 def get_order(order_id: int, customer_id: int | None) -> dict:
-    """One order of the logged-in customer: status, tracking, dates and items."""
+    """One order of the logged-in customer.
+
+    The order number and the owner are filtered together, so another customer's order is simply not
+    found. Day counts are computed here because the model is unreliable at date math.
+
+    Args:
+        order_id: Order number.
+        customer_id: Logged-in customer, or `None` when nobody is logged in.
+
+    Returns:
+        `order_id`, `status`, `order_date`, `days_since_order`, `estimated_delivery`,
+        `days_since_estimated_delivery`, `delivery_overdue` (shipped and past the estimate),
+        `tracking_code`, `payment_method`, `total_brl`, `items` and `notes`. Otherwise `NOT_LOGGED_IN`
+        or `ORDER_NOT_FOUND`.
+    """
     if customer_id is None:
         return NOT_LOGGED_IN
     t = tables()
@@ -371,7 +572,15 @@ def get_order(order_id: int, customer_id: int | None) -> dict:
 
 
 def get_my_account(customer_id: int | None) -> dict:
-    """Personal data and order list of the logged-in customer."""
+    """Personal data and order list of the logged-in customer.
+
+    Args:
+        customer_id: Logged-in customer, or `None` when nobody is logged in.
+
+    Returns:
+        `name`, `email`, `phone`, `city` and `orders` (newest first, each with `order_id`, `order_date`,
+        `status` and `total_brl`), or `NOT_LOGGED_IN`.
+    """
     if customer_id is None:
         return NOT_LOGGED_IN
     t = tables()

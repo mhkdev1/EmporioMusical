@@ -1,21 +1,50 @@
-#Terminal chat. /login and /logout are handled here in code; everything else goes to the agent.
+"""Terminal chat.
+
+`/login` and `/logout` are handled here in code; everything else goes to the agent. Run it with
+`python -m src.cli`.
+"""
 from src import agent, tools
 
 EXIT_WORDS = {"sair", "exit"}
+"""Words that close the chat."""
+
 LOGIN_FAILED = "Não foi possível entrar com esse dado. Confira o e-mail ou use o telefone do cadastro."
+"""Shown for any failed login, without saying whether the contact exists."""
 
 
 class Chat:
-    """One conversation: who is logged in plus the message history."""
+    """State of one conversation.
+
+    Attributes:
+        bot: The agent from `src.agent.build_agent()`.
+        customer_id: Logged-in customer, or `None`.
+        history: Messages sent to the agent so far.
+        pending: First contact of an ambiguous login, waiting for the second one.
+    """
 
     def __init__(self, bot):
+        """Start a logged-out conversation with an empty history.
+
+        Args:
+            bot: The agent to send messages to.
+        """
         self.bot = bot
         self.customer_id: int | None = None
         self.history: list = []
         self.pending: str | None = None  # first contact typed, waiting for the second one
 
     def handle(self, text: str) -> str:
-        """Answer one line typed by the customer."""
+        """Answer one line typed by the customer.
+
+        `/login` and `/logout` are handled in code. If a login is waiting for a second contact, the line
+        is used as that contact. Anything else goes to the agent with the session's customer.
+
+        Args:
+            text: The line typed.
+
+        Returns:
+            The reply to show.
+        """
         command, _, arg = text.strip().partition(" ")
         if command == "/login":
             return self.login(arg)
@@ -28,6 +57,19 @@ class Chat:
         return reply
 
     def login(self, contact: str, confirm: str | None = None) -> str:
+        """Log a customer in by e-mail or phone.
+
+        When the contact matches more than one record, the reply asks for the other contact and the
+        next line typed is used as `confirm`. Logging in as a different customer clears the history,
+        so one customer's data never stays in the model's context for the next.
+
+        Args:
+            contact: E-mail or phone typed after `/login`.
+            confirm: Second contact, for an ambiguous first one.
+
+        Returns:
+            A greeting, a request for the other contact, or `LOGIN_FAILED`.
+        """
         if not contact.strip():
             return "Use: /login seu-email-ou-telefone"
         result = tools.find_customer(contact, confirm)
@@ -45,12 +87,22 @@ class Chat:
         return f"Olá, {result['name'].split()[0]}! Você entrou na sua conta."
     
     def logout(self) -> str:
+        """End the session and clear the history, which may hold personal data.
+
+        Returns:
+            A confirmation message.
+        """
         self.customer_id = None
         self.history = []  # the conversation may hold personal data
         return "Você saiu da sua conta."
 
 
 def main() -> None:
+    """Run the terminal chat until the customer types `sair`/`exit` or presses Ctrl+C.
+
+    Replies to commands are labeled "Sistema" and replies from the agent "Melodia". Model errors (quota,
+    overload, network) are printed and the chat stays open.
+    """
     chat = Chat(agent.build_agent())
     print("Empório da Música, atendimento virtual. Digite 'sair' para encerrar.")
     print("Para ver seus pedidos: /login seu-email-ou-telefone   |   /logout para sair da conta.\n")
