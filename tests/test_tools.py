@@ -310,3 +310,25 @@ def test_every_account_lists_exactly_its_own_orders():
     for c in t["customers"].itertuples():
         own = set(t["orders"][t["orders"]["customer_id"] == c.customer_id]["order_id"])
         assert {o["order_id"] for o in tools.get_my_account(c.customer_id)["orders"]} == own
+
+
+@pytest.mark.parametrize("term", ["barato", "mais barato", "menor custo", "o equipamento mais barato", "produto"])
+def test_price_words_are_not_search_terms(term):
+    assert tools.search_products(term=term) == tools.search_products()
+
+
+@pytest.mark.parametrize("category", ["Todos", "todas", "qualquer"])
+def test_any_category_means_no_filter(category):
+    assert tools.search_products(category=category) == tools.search_products()
+
+
+def test_cheapest_and_most_expensive():
+    cheapest = tools.search_products()["products"][0]
+    priciest = tools.search_products(sort="most_expensive")["products"][0]
+    in_stock = [p for p in tools.search_products()["products"] if p["availability"] == "in_stock"]
+    assert cheapest["name"] == "Shelby SU-21S Soprano Sunburst" and cheapest["final_price_brl"] == 159.9
+    assert priciest["final_price_brl"] >= max(p["final_price_brl"] for p in in_stock)
+
+
+def test_filler_words_mixed_with_a_real_term():
+    assert tools.search_products(term="violão yamaha mais barato") == tools.search_products(term="violão yamaha")

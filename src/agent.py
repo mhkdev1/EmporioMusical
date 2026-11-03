@@ -24,20 +24,26 @@ Section = Literal[tuple(tools.POLICY_HEADINGS)]
 
 
 @tool
-def search_products(category: str | None = None, max_price: float | None = None, term: str | None = None) -> dict:
+def search_products(category: str | None = None, max_price: float | None = None, term: str | None = None,
+                    sort: Literal["cheapest", "most_expensive"] = "cheapest") -> dict:
     """Search the catalog. Use it for ANY question about a product's price, stock, specs or for recommendations.
 
-    All arguments are optional. If the customer names a product, search by term only (brand, model).
-    category is a catalog category such as Violões, Guitarras, Baixos, Ukuleles. max_price is in BRL.
+    All arguments are optional. Results come sorted by price, so the first product is the answer to
+    "mais barato" (sort="cheapest") or "mais caro" (sort="most_expensive"). For those questions don't
+    put price words in term and don't invent a max_price.
+    term: brand, model or feature only (Yamaha, GD20, nylon, elétrico). Leave it empty to search everything.
+    category: set it whenever the customer names a kind of instrument ("violão" -> Violões, "guitarra" ->
+    Guitarras, "baixo" -> Baixos, "teclado" -> Teclados e Pianos). Leave it empty only for "any product".
+    max_price: only when the customer gives a price limit, in BRL.
     Prices, PIX price and installments come already calculated: quote them as they are.
     """
     # The model sometimes makes up a category ("acústico"). Instead of failing, I send back the real
     # list so it can try again. Read from the CSV on each call, so new categories show up right away.
     categories = sorted(tools.tables()["categories"]["name"])
-    if category and tools.normalize(category) not in {tools.normalize(c) for c in categories}:
-        return {"error": f"Unknown category '{category}'. Use one of: {', '.join(categories)}, or search by term only."}
-    return tools.search_products(category, max_price, term)
-
+    known = {tools.normalize(c) for c in categories} | tools.ANY_CATEGORY
+    if category and tools.normalize(category) not in known:
+        return {"error": f"Unknown category '{category}'. Use one of: {', '.join(categories)}, or leave it empty."}
+    return tools.search_products(category, max_price, term, sort)
 
 @tool
 def active_promotions(product_id: int | None = None) -> list[dict]:
@@ -110,4 +116,4 @@ def ask(agent, history: list, text: str, customer_id: int | None = None) -> tupl
         context=Session(customer_id),
         config={"recursion_limit": MAX_STEPS},
     )
-    return result["messages"][-1].content, result["messages"]
+    return result["messages"][-1].text, result["messages"]

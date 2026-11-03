@@ -15,6 +15,15 @@ from datetime import date
 PIX_DISCOUNT = 0.05  #5% off the list price
 MAX_RESULTS = 10  # keeps the tool output short for the model
 
+# Words people use to talk about price or to mean "any product". They aren't product names, so I drop
+# them from the search term instead of letting "barato" or "menor custo" make the search come back empty.
+FILLER_WORDS = {
+    "barato", "barata", "baratos", "baratas", "caro", "cara", "caros", "caras", "mais", "menos",
+    "menor", "maior", "custo", "preco", "precos", "valor", "produto", "produtos", "equipamento",
+    "equipamentos", "item", "itens", "qual", "quais", "o", "a", "os", "as", "de", "do", "da", "um", "uma",
+}
+ANY_CATEGORY = {"todos", "todas", "todo", "toda", "qualquer", "geral", "all"}
+
 DATA = Path(__file__).parent / "data"
 CSV_PREFIX = "desafio_tecnico_ai_eng - "
 CSV_FILES = [DATA / f"{CSV_PREFIX}{name}.csv" for name in
@@ -178,13 +187,19 @@ def availability(status: str, stock: int) -> str:
 # ---------- catalog, promotions and policy lookups
 
 
-def search_products(category: str | None = None, max_price: float | None = None, term: str | None = None) -> dict:
-    """Products filtered by category, max final price and words in name/description. All optional."""
+def search_products(category: str | None = None, max_price: float | None = None, term: str | None = None,
+                    sort: str = "cheapest") -> dict:
+    """Products filtered by category, max final price and words in name/description. All optional.
+
+    sort is "cheapest" or "most_expensive".
+    """
     products = tables()["products"]
-    if category:
+    if category and normalize(category) not in ANY_CATEGORY:
         products = products[products["category"].map(normalize) == normalize(category)]
     if term:
         for word in normalize(term).split():  # every word has to show up somewhere
+            if word in FILLER_WORDS:
+                continue
             products = products[products["search_text"].str.contains(word, regex=False)]
 
     results = []
@@ -202,8 +217,10 @@ def search_products(category: str | None = None, max_price: float | None = None,
         if max_price is None or item["final_price_brl"] <= max_price:
             results.append(item)
 
-    # In-stock first, then cheapest. Otherwise the 10-item cut could hide products people can buy.
-    results.sort(key=lambda r: (r["availability"] != "in_stock", r["final_price_brl"]))
+
+    # In-stock first, then by price. Otherwise the 10-item cut could hide products people can buy.
+    sign = -1 if sort == "most_expensive" else 1
+    results.sort(key=lambda r: (r["availability"] != "in_stock", sign * r["final_price_brl"]))
     found = {"total_found": len(results), "products": results[:MAX_RESULTS]}
     # Nothing found can be bought: hand over real alternatives, or a small model makes some up.
     if results and all(r["availability"] != "in_stock" for r in results):
