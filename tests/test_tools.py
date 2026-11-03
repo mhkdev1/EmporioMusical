@@ -228,6 +228,8 @@ def test_lookups_return_plain_json():
 
 # ---------- login, orders and the customer's own account
 
+# ---------- login, orders and the customer's own account
+
 PEDRO, ANA = 3, 2  # Pedro owns orders 1 and 19, Ana owns order 8
 
 
@@ -239,27 +241,52 @@ PEDRO, ANA = 3, 2  # Pedro owns orders 1 and 19, Ana owns order 8
     "67984321098",
 ])
 def test_find_customer_by_email_or_phone(contact):
-    assert tools.find_customer(contact) == {"customer_id": PEDRO, "name": "Pedro Henrique Oliveira"}
+    assert tools.find_customer(contact) == {"status": "ok", "customer_id": PEDRO, "name": "Pedro Henrique Oliveira"}
 
 
 @pytest.mark.parametrize("contact", ["", "x", "9981", "67", "@jmail.com", "pedro", "someone@else.com"])
 def test_find_customer_rejects_unknown_or_partial(contact):
-    assert tools.find_customer(contact) is None
+    assert tools.find_customer(contact) == {"status": "not_found"}
 
 
-def test_shared_email_cannot_log_in_but_each_phone_can():
-    # Data quirk: customers 11 and 43 share bruno.martins@jmail.com (probably one person registered twice).
-    customers = tools.tables()["customers"]
-    duplicated = customers[customers["email"].duplicated(keep=False)]["email"].unique().tolist()
-    assert duplicated == ["bruno.martins@jmail.com"], "new duplicated e-mails showed up in the data"
-    assert tools.find_customer("bruno.martins@jmail.com") is None
-    assert tools.find_customer("(67) 98543-2109")["customer_id"] == 11
-    assert tools.find_customer("(67) 99456-3456")["customer_id"] == 43
+def test_duplicated_contacts_in_the_data():
+    # If this fails after a CSV update, new duplicates showed up: check them.
+    assert tools.duplicate_contacts() == {"emails": ["bruno.martins@jmail.com"], "phones": []}
 
 
-def test_every_customer_can_log_in_by_phone():
+def test_shared_email_asks_for_the_phone():
+    assert tools.find_customer("bruno.martins@jmail.com") == {"status": "need_more", "ask_for": "phone"}
+
+
+@pytest.mark.parametrize("phone, customer_id", [("(67) 98543-2109", 11), ("99456-3456", 43)])
+def test_phone_tells_the_two_records_apart(phone, customer_id):
+    assert tools.find_customer("bruno.martins@jmail.com", confirm=phone)["customer_id"] == customer_id
+
+
+def test_confirmation_must_belong_to_the_same_records():
+    # Pedro's phone is real, but it isn't one of the records behind Bruno's e-mail.
+    assert tools.find_customer("bruno.martins@jmail.com", confirm="(67) 98432-1098") == {"status": "not_found"}
+
+
+def test_phone_suffix_of_two_people_asks_for_the_email(monkeypatch):
+    # Give Ana a number that only differs from Pedro's in the area code.
+    t = tools.tables()
+    customers = t["customers"].copy()
+    customers.loc[customers["customer_id"] == ANA, "phone_digits"] = "11984321098"
+    monkeypatch.setattr(tools, "tables", lambda: {**t, "customers": customers})
+    assert tools.find_customer("98432-1098") == {"status": "need_more", "ask_for": "email"}
+    assert tools.find_customer("98432-1098", confirm="pedro.oliveira@jmail.com")["customer_id"] == PEDRO
+    assert tools.find_customer("98432-1098", confirm="anacarol.ferreira@coldmail.com")["customer_id"] == ANA
+
+
+def test_every_customer_can_log_in():
+    """By phone directly, and by e-mail (confirming with the phone when the e-mail is shared)."""
     for c in tools.tables()["customers"].itertuples():
         assert tools.find_customer(c.phone)["customer_id"] == c.customer_id
+        by_email = tools.find_customer(c.email)
+        if by_email["status"] == "need_more":
+            by_email = tools.find_customer(c.email, confirm=c.phone)
+        assert by_email["customer_id"] == c.customer_id
 
 
 def test_orders_and_account_need_login():
@@ -311,6 +338,8 @@ def test_every_account_lists_exactly_its_own_orders():
         own = set(t["orders"][t["orders"]["customer_id"] == c.customer_id]["order_id"])
         assert {o["order_id"] for o in tools.get_my_account(c.customer_id)["orders"]} == own
 
+
+# ---------- search: price words, any category, sort
 
 @pytest.mark.parametrize("term", ["barato", "mais barato", "menor custo", "o equipamento mais barato", "produto"])
 def test_price_words_are_not_search_terms(term):

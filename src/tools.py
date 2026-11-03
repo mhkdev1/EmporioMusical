@@ -277,20 +277,43 @@ NOT_LOGGED_IN = {"error": "Customer is not logged in. Ask them to type /login fo
 # so nobody can find out which order numbers exist by trying them.
 ORDER_NOT_FOUND = {"error": "No order with this number for the logged-in customer. Ask them to check the number."}
 
-# Find a customer by their e-mail or phone number.
-def find_customer(email_or_phone: str) -> dict | None:
-    
-    customers = tables()["customers"]
+#find duplicated contacts, so the CLI can ask for the other one when a login is ambiguous
+def duplicate_contacts() -> dict[str, list[str]]:
+    """E-mails and phones that show up in more than one customer record."""
+    c = tables()["customers"]
+    return {
+        "emails": sorted(c.loc[c["email"].duplicated(keep=False), "email"].unique()),
+        "phones": sorted(c.loc[c["phone_digits"].duplicated(keep=False), "phone_digits"].unique()),
+    }
+
+
+def _matches(customers: pd.DataFrame, email_or_phone: str) -> pd.Series:
+    """Rows whose e-mail is exactly this, or whose phone ends with these digits (8 or more)."""
     given = email_or_phone.strip().lower()
     digits = "".join(ch for ch in given if ch.isdigit())
     by_email = customers["email"] == given
     by_phone = customers["phone_digits"].str.endswith(digits) if len(digits) >= 8 else False
-    matches = customers[by_email | by_phone]
-    if len(matches) != 1:
-        return None
-    c = matches.iloc[0]
-    return {"customer_id": int(c["customer_id"]), "name": c["name"]}
+    return by_email | by_phone
 
+
+def find_customer(email_or_phone: str, confirm: str | None = None) -> dict:
+    """Login lookup, used by /login. Never exposed to the model.
+
+    Returns {"status": "ok", "customer_id", "name"} when exactly one record matches.
+    When more than one does (customers 11 and 43 share an e-mail), it returns
+    {"status": "need_more", "ask_for": "phone" or "email"} so the CLI can ask for the other contact,
+    and the second call passes it in confirm. Anything else is {"status": "not_found"}.
+    """
+    customers = tables()["customers"]
+    found = customers[_matches(customers, email_or_phone)]
+    if confirm is not None:
+        found = found[_matches(found, confirm)]  # the second contact must belong to one of the first hits
+    if len(found) == 1:
+        c = found.iloc[0]
+        return {"status": "ok", "customer_id": int(c["customer_id"]), "name": c["name"]}
+    if len(found) > 1 and confirm is None:
+        return {"status": "need_more", "ask_for": "phone" if "@" in email_or_phone else "email"}
+    return {"status": "not_found"}
 
 def get_order(order_id: int, customer_id: int | None) -> dict:
     """One order of the logged-in customer: status, tracking, dates and items."""

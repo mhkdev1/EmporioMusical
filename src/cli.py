@@ -12,6 +12,7 @@ class Chat:
         self.bot = bot
         self.customer_id: int | None = None
         self.history: list = []
+        self.pending: str | None = None  # first contact typed, waiting for the second one
 
     def handle(self, text: str) -> str:
         """Answer one line typed by the customer."""
@@ -20,22 +21,29 @@ class Chat:
             return self.login(arg)
         if command == "/logout":
             return self.logout()
+        if self.pending:  # this line answers "which record is yours?"
+            return self.login(self.pending, confirm=text)
         # ask() only hands back a new history when the model answered, so a failed call changes nothing.
         reply, self.history = agent.ask(self.bot, self.history, text, self.customer_id)
         return reply
 
-    def login(self, contact: str) -> str:
+    def login(self, contact: str, confirm: str | None = None) -> str:
         if not contact.strip():
             return "Use: /login seu-email-ou-telefone"
-        customer = tools.find_customer(contact)
-        if customer is None:
+        result = tools.find_customer(contact, confirm)
+        self.pending = None
+        if result["status"] == "need_more":
+            self.pending = contact
+            other = "telefone" if result["ask_for"] == "phone" else "e-mail"
+            return f"Encontrei mais de um cadastro com esse dado. Para confirmar que é você, digite o {other} do seu cadastro."
+        if result["status"] == "not_found":
             return LOGIN_FAILED
-        if customer["customer_id"] != self.customer_id:
+        if result["customer_id"] != self.customer_id:
             self.history = []  # a new customer must not inherit the previous one's conversation
-        self.customer_id = customer["customer_id"]
+        self.customer_id = result["customer_id"]
         # There's no password in the data. A real store would send a one-time code to the e-mail or phone first.
-        return f"Olá, {customer['name'].split()[0]}! Você entrou na sua conta."
-
+        return f"Olá, {result['name'].split()[0]}! Você entrou na sua conta."
+    
     def logout(self) -> str:
         self.customer_id = None
         self.history = []  # the conversation may hold personal data
@@ -55,11 +63,13 @@ def main() -> None:
             continue
         if text.lower() in EXIT_WORDS:
             break
-        label = "Sistema" if text.startswith("/") else "Melodia"
+        label = "Sistema" if text.startswith("/") or chat.pending else "Melodia"
         try:
             print(f"{label}: {chat.handle(text)}\n")
         except Exception as exc:  # model offline, quota, network: keep the chat open
             print(f"[Não consegui falar com o modelo agora: {exc}]\n")
+
+
 
 
 if __name__ == "__main__":
