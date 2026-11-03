@@ -4,12 +4,12 @@ Run from the project root:  pytest -v
 """
 import shutil
 import time
+from datetime import date
 
 import pandas as pd
 import pytest
 
 from src import tools
-
 
 # ---------- normalize
 
@@ -158,3 +158,155 @@ def test_price_info_with_promotion_has_no_pix():
 ])
 def test_availability(status, stock, expected):
     assert tools.availability(status, stock) == expected
+
+    # ---------- catalog, promotions and policy lookups
+
+def test_search_by_name_returns_prices_from_code():
+    found = tools.search_products(term="takamine gd20")
+    assert found["total_found"] == 1
+    gd20 = found["products"][0]
+    assert gd20["name"] == "Takamine GD20 Dreadnought Natural"
+    assert gd20["final_price_brl"] == 2199.0 and gd20["pix_price_brl"] == 2089.05
+    assert gd20["max_installments"] == 12 and gd20["installment_brl"] == 183.25
+
+
+def test_search_by_category_and_max_price():
+    found = tools.search_products(category="Violões", max_price=1000)
+    assert found["total_found"] == 14
+    assert len(found["products"]) == tools.MAX_RESULTS  # cut at 10
+    assert all(p["category"] == "Violões" and p["final_price_brl"] <= 1000 for p in found["products"])
+
+
+def test_search_puts_in_stock_first_and_cheapest_first():
+    products = tools.search_products(category="Violões", max_price=1000)["products"]
+    assert all(p["availability"] == "in_stock" for p in products)
+    prices = [p["final_price_brl"] for p in products]
+    assert prices == sorted(prices)
+
+
+@pytest.mark.parametrize("a, b", [
+    ({"category": "Violões"}, {"category": "violoes"}),
+    ({"category": "Violões"}, {"category": "VIOLÕES"}),
+    ({"term": "elétrico"}, {"term": "eletrico"}),
+])
+def test_search_ignores_accents_and_case(a, b):
+    assert tools.search_products(**a) == tools.search_products(**b)
+
+
+def test_search_shows_out_of_stock_products():
+    assert tools.search_products(term="GF-3D")["products"][0]["availability"] == "out_of_stock"
+
+
+@pytest.mark.parametrize("kwargs", [{"term": "xyz"}, {"category": "Pianos de cauda"}, {"max_price": 1}])
+def test_search_with_no_match_is_empty(kwargs):
+    assert tools.search_products(**kwargs) == {"total_found": 0, "products": []}
+
+
+def test_active_promotions_lists_four():
+    promos = tools.active_promotions()
+    assert len(promos) == 4
+    assert all(p["pix_price_brl"] is None for p in promos)  # no PIX on top of a promotion
+
+
+def test_active_promotions_for_one_product():
+    taylor = tools.active_promotions(94)
+    assert len(taylor) == 1 and taylor[0]["final_price_brl"] == 5519.08
+    assert tools.active_promotions(95) == []
+
+
+def test_get_policy_section():
+    assert "09:00 às 18:00" in tools.get_policy_section("hours")
+    assert tools.get_policy_section("nope").startswith("Unknown section 'nope'. Available: about, hours")
+
+
+def test_lookups_return_plain_json():
+    import json
+    json.dumps([tools.search_products(), tools.active_promotions()], ensure_ascii=False)
+
+
+
+
+# ---------- login, orders and the customer's own account
+
+PEDRO, ANA = 3, 2  # Pedro owns orders 1 and 19, Ana owns order 8
+
+
+@pytest.mark.parametrize("contact", [
+    "pedro.oliveira@jmail.com",
+    "  PEDRO.OLIVEIRA@JMAIL.COM ",  # extra spaces and caps
+    "(67) 98432-1098",
+    "98432-1098",                    # without the area code
+    "67984321098",
+])
+def test_find_customer_by_email_or_phone(contact):
+    assert tools.find_customer(contact) == {"customer_id": PEDRO, "name": "Pedro Henrique Oliveira"}
+
+
+@pytest.mark.parametrize("contact", ["", "x", "9981", "67", "@jmail.com", "pedro", "someone@else.com"])
+def test_find_customer_rejects_unknown_or_partial(contact):
+    assert tools.find_customer(contact) is None
+
+
+def test_shared_email_cannot_log_in_but_each_phone_can():
+    # Data quirk: customers 11 and 43 share bruno.martins@jmail.com (probably one person registered twice).
+    customers = tools.tables()["customers"]
+    duplicated = customers[customers["email"].duplicated(keep=False)]["email"].unique().tolist()
+    assert duplicated == ["bruno.martins@jmail.com"], "new duplicated e-mails showed up in the data"
+    assert tools.find_customer("bruno.martins@jmail.com") is None
+    assert tools.find_customer("(67) 98543-2109")["customer_id"] == 11
+    assert tools.find_customer("(67) 99456-3456")["customer_id"] == 43
+
+
+def test_every_customer_can_log_in_by_phone():
+    for c in tools.tables()["customers"].itertuples():
+        assert tools.find_customer(c.phone)["customer_id"] == c.customer_id
+
+
+def test_orders_and_account_need_login():
+    assert tools.get_order(1, None) == tools.NOT_LOGGED_IN
+    assert tools.get_my_account(None) == tools.NOT_LOGGED_IN
+
+
+def test_owner_sees_the_order():
+    order = tools.get_order(1, PEDRO)
+    assert order["status"] == "delivered"
+    assert order["tracking_code"] == "BRAB1234567BR"
+    assert order["items"] == [{"name": "Martin D-28 Dreadnought Natural", "quantity": 1}]
+
+
+def test_nobody_sees_someone_elses_order():
+    """Every order against every customer: only the owner gets it back."""
+    t = tools.tables()
+    for order in t["orders"].itertuples():
+        for customer in t["customers"].itertuples():
+            result = tools.get_order(order.order_id, customer.customer_id)
+            if customer.customer_id == order.customer_id:
+                assert result["order_id"] == order.order_id
+            else:
+                assert result == tools.ORDER_NOT_FOUND, (order.order_id, customer.customer_id)
+
+
+def test_not_found_looks_the_same_whether_the_order_exists_or_not():
+    assert tools.get_order(1, ANA) == tools.get_order(999, ANA) == tools.ORDER_NOT_FOUND
+
+
+def test_delivery_dates_are_computed_in_code():
+    order8 = tools.get_order(8, ANA)  # shipped, expected on 2026-02-28
+    today = date.today()
+    assert order8["days_since_estimated_delivery"] == (today - date(2026, 2, 28)).days
+    assert order8["delivery_overdue"] == (today > date(2026, 2, 28))
+    assert tools.get_order(1, PEDRO)["delivery_overdue"] is False  # delivered orders are never late
+
+
+def test_my_account_has_only_my_data():
+    account = tools.get_my_account(PEDRO)
+    assert account["name"] == "Pedro Henrique Oliveira"
+    assert account["email"] == "pedro.oliveira@jmail.com"
+    assert sorted(o["order_id"] for o in account["orders"]) == [1, 19]
+
+
+def test_every_account_lists_exactly_its_own_orders():
+    t = tools.tables()
+    for c in t["customers"].itertuples():
+        own = set(t["orders"][t["orders"]["customer_id"] == c.customer_id]["order_id"])
+        assert {o["order_id"] for o in tools.get_my_account(c.customer_id)["orders"]} == own

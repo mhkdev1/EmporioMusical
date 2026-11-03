@@ -8,10 +8,12 @@ from pathlib import Path
 
 import pandas as pd
 from pypdf import PdfReader
+from datetime import date
 
 
 
 PIX_DISCOUNT = 0.05  #5% off the list price
+MAX_RESULTS = 10  # keeps the tool output short for the model
 
 DATA = Path(__file__).parent / "data"
 CSV_PREFIX = "desafio_tecnico_ai_eng - "
@@ -172,3 +174,140 @@ def availability(status: str, stock: int) -> str:
     if status != "active":
         return status
     return "in_stock" if stock > 0 else "out_of_stock"
+
+# ---------- catalog, promotions and policy lookups
+
+
+def search_products(category: str | None = None, max_price: float | None = None, term: str | None = None) -> dict:
+    """Products filtered by category, max final price and words in name/description. All optional."""
+    products = tables()["products"]
+    if category:
+        products = products[products["category"].map(normalize) == normalize(category)]
+    if term:
+        for word in normalize(term).split():  # every word has to show up somewhere
+            products = products[products["search_text"].str.contains(word, regex=False)]
+
+    results = []
+    for p in products.itertuples():
+        item = {
+            "product_id": int(p.product_id),
+            "name": p.name,
+            "category": p.category,
+            "availability": availability(p.status, p.stock_quantity),
+            "stock_quantity": int(p.stock_quantity),
+            **price_info(int(p.product_id), float(p.price_brl)),
+            "specs": p.specs,
+        }
+        # max_price is checked on the final price, so a product on sale can fit under the limit
+        if max_price is None or item["final_price_brl"] <= max_price:
+            results.append(item)
+
+    # In-stock first, then cheapest. Otherwise the 10-item cut could hide products people can buy.
+    results.sort(key=lambda r: (r["availability"] != "in_stock", r["final_price_brl"]))
+    return {"total_found": len(results), "products": results[:MAX_RESULTS]}
+
+
+def active_promotions(product_id: int | None = None) -> list[dict]:
+    """Active promotions with the discounted price, for every product or just one."""
+    promos = tables()["promotions"]
+    promos = promos[promos["is_active"]]
+    if product_id is not None:
+        promos = promos[promos["product_id"] == int(product_id)]
+    products = tables()["products"].set_index("product_id")
+
+    result = []
+    for promo in promos.itertuples():
+        p = products.loc[promo.product_id]
+        result.append({
+            "product_id": int(promo.product_id),
+            "name": p["name"],
+            "availability": availability(p["status"], p["stock_quantity"]),
+            **price_info(int(promo.product_id), float(p["price_brl"])),
+        })
+    return result
+
+
+def get_policy_section(section: str) -> str:
+    """Text of one section of the manual. Unknown keys get the list of valid ones back."""
+    sections = policy()
+    if section not in sections:
+        return f"Unknown section '{section}'. Available: {', '.join(sections)}."
+    return sections[section]
+
+
+
+# ---------- login, orders and the customer's own account
+
+NOT_LOGGED_IN = {"error": "Customer is not logged in. Ask them to type /login followed by their e-mail or phone."}
+# Same answer for "this order doesn't exist" and "this order belongs to someone else",
+# so nobody can find out which order numbers exist by trying them.
+ORDER_NOT_FOUND = {"error": "No order with this number for the logged-in customer. Ask them to check the number."}
+
+# Find a customer by their e-mail or phone number.
+def find_customer(email_or_phone: str) -> dict | None:
+    
+    customers = tables()["customers"]
+    given = email_or_phone.strip().lower()
+    digits = "".join(ch for ch in given if ch.isdigit())
+    by_email = customers["email"] == given
+    by_phone = customers["phone_digits"].str.endswith(digits) if len(digits) >= 8 else False
+    matches = customers[by_email | by_phone]
+    if len(matches) != 1:
+        return None
+    c = matches.iloc[0]
+    return {"customer_id": int(c["customer_id"]), "name": c["name"]}
+
+
+def get_order(order_id: int, customer_id: int | None) -> dict:
+    """One order of the logged-in customer: status, tracking, dates and items."""
+    if customer_id is None:
+        return NOT_LOGGED_IN
+    t = tables()
+    orders = t["orders"]
+    # The owner check is part of the filter: someone else's order just isn't found.
+    match = orders[(orders["order_id"] == int(order_id)) & (orders["customer_id"] == customer_id)]
+    if match.empty:
+        return ORDER_NOT_FOUND
+    order = match.iloc[0]
+
+    items = t["order_items"].merge(t["products"], on="product_id")
+    items = items[items["order_id"] == order["order_id"]]
+
+    # Date math happens here. Small models are bad at it and called an 8-month-late delivery "recent".
+    today = date.today()
+    ordered = order["order_date"].date()
+    eta = None if pd.isna(order["estimated_delivery"]) else order["estimated_delivery"].date()
+    return {
+        "order_id": int(order["order_id"]),
+        "status": order["status"],  # pending, confirmed, shipped, delivered or cancelled
+        "order_date": ordered.isoformat(),
+        "days_since_order": (today - ordered).days,
+        "estimated_delivery": eta.isoformat() if eta else None,
+        "days_since_estimated_delivery": (today - eta).days if eta else None,
+        "delivery_overdue": bool(order["status"] == "shipped" and eta is not None and eta < today),
+        "tracking_code": None if pd.isna(order["tracking_code"]) else order["tracking_code"],
+        "payment_method": order["payment_method"],
+        "total_brl": float(order["total_brl"]),
+        "items": [{"name": i.name, "quantity": int(i.quantity)} for i in items.itertuples()],
+        "notes": None if pd.isna(order["notes"]) else order["notes"],
+    }
+
+
+def get_my_account(customer_id: int | None) -> dict:
+    """Personal data and order list of the logged-in customer."""
+    if customer_id is None:
+        return NOT_LOGGED_IN
+    t = tables()
+    c = t["customers"][t["customers"]["customer_id"] == customer_id].iloc[0]
+    orders = t["orders"][t["orders"]["customer_id"] == customer_id].sort_values("order_date", ascending=False)
+    return {
+        "name": c["name"],
+        "email": c["email"],
+        "phone": c["phone"],
+        "city": c["city"],
+        "orders": [
+            {"order_id": int(o.order_id), "order_date": o.order_date.date().isoformat(),
+             "status": o.status, "total_brl": float(o.total_brl)}
+            for o in orders.itertuples()
+        ],
+    }
