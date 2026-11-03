@@ -204,7 +204,24 @@ def search_products(category: str | None = None, max_price: float | None = None,
 
     # In-stock first, then cheapest. Otherwise the 10-item cut could hide products people can buy.
     results.sort(key=lambda r: (r["availability"] != "in_stock", r["final_price_brl"]))
-    return {"total_found": len(results), "products": results[:MAX_RESULTS]}
+    found = {"total_found": len(results), "products": results[:MAX_RESULTS]}
+    # Nothing found can be bought: hand over real alternatives, or a small model makes some up.
+    if results and all(r["availability"] != "in_stock" for r in results):
+        found["in_stock_alternatives"] = similar_in_stock(results[0])
+    return found
+
+def similar_in_stock(product: dict, limit: int = 3) -> list[dict]:
+    """In-stock products from the same category, closest in price to the given one."""
+    products = tables()["products"]
+    in_stock = products[(products["category"] == product["category"])
+                        & (products["status"] == "active") & (products["stock_quantity"] > 0)]
+    candidates = [
+        {"product_id": int(p.product_id), "name": p.name,
+         "final_price_brl": price_info(int(p.product_id), float(p.price_brl))["final_price_brl"]}
+        for p in in_stock.itertuples()
+    ]
+    candidates.sort(key=lambda c: abs(c["final_price_brl"] - product["final_price_brl"]))
+    return candidates[:limit]
 
 
 def active_promotions(product_id: int | None = None) -> list[dict]:
@@ -311,3 +328,4 @@ def get_my_account(customer_id: int | None) -> dict:
             for o in orders.itertuples()
         ],
     }
+
