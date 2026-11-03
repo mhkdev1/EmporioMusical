@@ -9,6 +9,10 @@ from pathlib import Path
 import pandas as pd
 from pypdf import PdfReader
 
+
+
+PIX_DISCOUNT = 0.05  #5% off the list price
+
 DATA = Path(__file__).parent / "data"
 CSV_PREFIX = "desafio_tecnico_ai_eng - "
 CSV_FILES = [DATA / f"{CSV_PREFIX}{name}.csv" for name in
@@ -120,3 +124,51 @@ def policy() -> dict[str, str]:
     """Current policy sections. Reloads only when the PDF changed on disk."""
     return _policy_at(POLICY_FILE.stat().st_mtime)
 
+
+# ---------- prices and stock (the model never does this math)
+
+
+
+    # Best active promotion for a product. promotions don't stack so if a product has more than one I take the biggest.
+    
+def active_discount(product_id: int) -> tuple[int, str] | None:
+    
+    promos = tables()["promotions"]
+    rows = promos[(promos["product_id"] == product_id) & promos["is_active"]]
+    if rows.empty:
+        return None
+    best = rows.loc[rows["discount_percent"].idxmax()]
+    return int(best["discount_percent"]), best["description"]
+
+
+#  Most interest-free installments allowed for this price (manual 3.1). Minimum installment: R$ 50 up to 3x, R$ 80 from 4x to 6x, R$ 100 from 7x to 12x.   
+def max_installments(price: float) -> int:
+   
+    for n in range(12, 1, -1):
+        minimum = 100 if n >= 7 else 80 if n >= 4 else 50
+        if price / n >= minimum:
+            return n
+    return 1
+
+
+def price_info(product_id: int, list_price: float) -> dict:
+    """Every price figure the agent is allowed to quote for a product."""
+    promo = active_discount(product_id)
+    if promo:
+        percent, campaign = promo
+        final = round(list_price * (1 - percent / 100), 2)
+        info = {"list_price_brl": list_price, "promotion": campaign, "discount_percent": percent,
+                "final_price_brl": final, "pix_price_brl": None}  # PIX doesn't apply on top of a promo
+    else:
+        final = list_price
+        info = {"list_price_brl": list_price, "final_price_brl": final,
+                "pix_price_brl": round(list_price * (1 - PIX_DISCOUNT), 2)}
+    n = max_installments(final)
+    return {**info, "max_installments": n, "installment_brl": round(final / n, 2)}
+
+
+def availability(status: str, stock: int) -> str:
+    """in_stock, out_of_stock, discontinued or coming_soon."""
+    if status != "active":
+        return status
+    return "in_stock" if stock > 0 else "out_of_stock"
